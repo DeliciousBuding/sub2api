@@ -19,28 +19,30 @@ type reqClientOptions struct {
 	ForceHTTP2  bool          // 是否强制使用 HTTP/2
 }
 
-// sharedReqClients 存储按配置参数缓存的 req 客户端实例
-//
-// 性能优化说明：
-// 原实现在每次 OAuth 刷新时都创建新的 req.Client：
-// 1. claude_oauth_service.go: 每次刷新创建新客户端
-// 2. openai_oauth_service.go: 每次刷新创建新客户端
-// 3. gemini_oauth_client.go: 每次刷新创建新客户端
-//
-// 新实现使用 sync.Map 缓存客户端：
-// 1. 相同配置（代理+超时+模拟设置）复用同一客户端
-// 2. 复用底层连接池，减少 TLS 握手开销
-// 3. LoadOrStore 保证并发安全，避免重复创建
-var sharedReqClients sync.Map
+type sharedReqClientEntry struct {
+	client    *req.Client
+	expiresAt time.Time
+	lastUsed  int64
+}
+
+type sharedReqClientPool struct {
+	mu      sync.Mutex
+	entries map[string]sharedReqClientEntry
+}
+
+var (
+	// OAuth/隐私设置等辅助请求的 client 组合有限，不需要无界缓存。
+	sharedReqClientTTL        = 15 * time.Minute
+	sharedReqClientMaxEntries = 128
+	sharedReqClients          = sharedReqClientPool{entries: make(map[string]sharedReqClientEntry)}
+)
 
 // getSharedReqClient 获取共享的 req 客户端实例
 // 性能优化：相同配置复用同一客户端，避免重复创建
 func getSharedReqClient(opts reqClientOptions) (*req.Client, error) {
 	key := buildReqClientKey(opts)
-	if cached, ok := sharedReqClients.Load(key); ok {
-		if c, ok := cached.(*req.Client); ok {
-			return c, nil
-		}
+	if cached, ok := sharedReqClients.get(key); ok {
+		return cached, nil
 	}
 
 	client := req.C().SetTimeout(opts.Timeout)
@@ -58,11 +60,7 @@ func getSharedReqClient(opts reqClientOptions) (*req.Client, error) {
 		client.SetProxyURL(trimmed)
 	}
 
-	actual, _ := sharedReqClients.LoadOrStore(key, client)
-	if c, ok := actual.(*req.Client); ok {
-		return c, nil
-	}
-	return client, nil
+	return sharedReqClients.store(key, client), nil
 }
 
 func buildReqClientKey(opts reqClientOptions) string {
@@ -83,4 +81,115 @@ func CreatePrivacyReqClient(proxyURL string) (*req.Client, error) {
 		Timeout:     30 * time.Second,
 		Impersonate: true, // Enable Chrome TLS fingerprint impersonation
 	})
+}
+
+func (p *sharedReqClientPool) get(key string) (*req.Client, bool) {
+	now := time.Now()
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.cleanupExpiredLocked(now)
+	entry, ok := p.entries[key]
+	if !ok || entry.client == nil {
+		return nil, false
+	}
+	entry.expiresAt = now.Add(sharedReqClientTTL)
+	entry.lastUsed = now.UnixNano()
+	p.entries[key] = entry
+	return entry.client, true
+}
+
+func (p *sharedReqClientPool) store(key string, client *req.Client) *req.Client {
+	now := time.Now()
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.cleanupExpiredLocked(now)
+	if entry, ok := p.entries[key]; ok && entry.client != nil && now.Before(entry.expiresAt) {
+		entry.expiresAt = now.Add(sharedReqClientTTL)
+		entry.lastUsed = now.UnixNano()
+		p.entries[key] = entry
+		closeReqClientIdle(client)
+		return entry.client
+	}
+
+	p.entries[key] = sharedReqClientEntry{
+		client:    client,
+		expiresAt: now.Add(sharedReqClientTTL),
+		lastUsed:  now.UnixNano(),
+	}
+	p.evictOverLimitLocked()
+	return client
+}
+
+func (p *sharedReqClientPool) cleanupExpiredLocked(now time.Time) {
+	for key, entry := range p.entries {
+		if entry.client == nil || !now.Before(entry.expiresAt) {
+			delete(p.entries, key)
+			closeReqClientIdle(entry.client)
+		}
+	}
+}
+
+func (p *sharedReqClientPool) evictOverLimitLocked() {
+	if sharedReqClientMaxEntries <= 0 {
+		return
+	}
+	for len(p.entries) > sharedReqClientMaxEntries {
+		var (
+			oldestKey  string
+			oldestTime int64
+			found      bool
+		)
+		for key, entry := range p.entries {
+			lastUsed := entry.lastUsed
+			if !found || lastUsed < oldestTime {
+				oldestKey = key
+				oldestTime = lastUsed
+				found = true
+			}
+		}
+		if !found {
+			return
+		}
+		entry := p.entries[oldestKey]
+		delete(p.entries, oldestKey)
+		closeReqClientIdle(entry.client)
+	}
+}
+
+func closeReqClientIdle(client *req.Client) {
+	if client == nil {
+		return
+	}
+	transport := client.GetTransport()
+	if transport != nil {
+		transport.CloseIdleConnections()
+	}
+}
+
+func (p *sharedReqClientPool) reset() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for key, entry := range p.entries {
+		delete(p.entries, key)
+		closeReqClientIdle(entry.client)
+	}
+}
+
+func (p *sharedReqClientPool) size() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.entries)
+}
+
+func (p *sharedReqClientPool) storeEntryForTest(key string, entry sharedReqClientEntry) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.entries == nil {
+		p.entries = make(map[string]sharedReqClientEntry)
+	}
+	p.entries[key] = entry
 }
