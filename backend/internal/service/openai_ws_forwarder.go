@@ -1548,7 +1548,13 @@ func buildOpenAIWSReplayInputSequence(
 		return nil, false, currentErr
 	}
 	if !hasPreviousResponseID {
-		return cloneOpenAIWSRawMessages(currentItems), currentExists, nil
+		items := cloneOpenAIWSRawMessages(currentItems)
+		if previousFullInputExists && len(previousFullInput) > 0 && currentExists && len(items) > 0 {
+			if repaired, changed := repairOpenAIWSToolTranscript(previousFullInput, items); changed {
+				return repaired, currentExists, nil
+			}
+		}
+		return items, currentExists, nil
 	}
 	if !previousFullInputExists {
 		return cloneOpenAIWSRawMessages(currentItems), currentExists, nil
@@ -1563,6 +1569,134 @@ func buildOpenAIWSReplayInputSequence(
 	merged = append(merged, cloneOpenAIWSRawMessages(previousFullInput)...)
 	merged = append(merged, cloneOpenAIWSRawMessages(currentItems)...)
 	return merged, true, nil
+}
+
+func repairOpenAIWSToolTranscript(previousItems []json.RawMessage, currentItems []json.RawMessage) ([]json.RawMessage, bool) {
+	if len(currentItems) == 0 {
+		return currentItems, false
+	}
+
+	previousCalls, previousOutputs := buildOpenAIWSToolTranscriptCache(previousItems)
+
+	currentCallPresent := make(map[string]struct{}, len(currentItems))
+	currentOutputPresent := make(map[string]struct{}, len(currentItems))
+	for _, item := range currentItems {
+		itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
+		callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
+		if callID == "" {
+			continue
+		}
+		if isOpenAIWSToolCallType(itemType) {
+			currentCallPresent[callID] = struct{}{}
+		}
+		if isOpenAIWSToolOutputType(itemType) {
+			currentOutputPresent[callID] = struct{}{}
+		}
+	}
+
+	filtered := make([]json.RawMessage, 0, len(currentItems)+2)
+	insertedCalls := make(map[string]struct{}, len(currentItems))
+	insertedOutputs := make(map[string]struct{}, len(currentItems))
+	changed := false
+
+	for _, item := range currentItems {
+		itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
+		callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
+
+		switch {
+		case isOpenAIWSToolOutputType(itemType):
+			if callID == "" {
+				changed = true
+				continue
+			}
+			if _, ok := currentCallPresent[callID]; ok {
+				filtered = append(filtered, item)
+				continue
+			}
+			if cachedCall, ok := previousCalls[callID]; ok {
+				if _, exists := insertedCalls[callID]; !exists {
+					filtered = append(filtered, cloneOpenAIWSRawMessage(cachedCall))
+					insertedCalls[callID] = struct{}{}
+					changed = true
+				}
+				filtered = append(filtered, item)
+				continue
+			}
+			changed = true
+			continue
+		case isOpenAIWSToolCallType(itemType):
+			if callID == "" {
+				changed = true
+				continue
+			}
+			if _, ok := currentOutputPresent[callID]; ok {
+				filtered = append(filtered, item)
+				continue
+			}
+			if cachedOutput, ok := previousOutputs[callID]; ok {
+				filtered = append(filtered, item)
+				if _, exists := insertedOutputs[callID]; !exists {
+					filtered = append(filtered, cloneOpenAIWSRawMessage(cachedOutput))
+					insertedOutputs[callID] = struct{}{}
+				}
+				changed = true
+				continue
+			}
+			changed = true
+			continue
+		default:
+			filtered = append(filtered, item)
+		}
+	}
+
+	if !changed {
+		return currentItems, false
+	}
+	return filtered, true
+}
+
+func buildOpenAIWSToolTranscriptCache(items []json.RawMessage) (map[string]json.RawMessage, map[string]json.RawMessage) {
+	calls := make(map[string]json.RawMessage)
+	outputs := make(map[string]json.RawMessage)
+	for _, item := range items {
+		itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
+		callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
+		if callID == "" {
+			continue
+		}
+		if isOpenAIWSToolCallType(itemType) {
+			calls[callID] = cloneOpenAIWSRawMessage(item)
+		}
+		if isOpenAIWSToolOutputType(itemType) {
+			outputs[callID] = cloneOpenAIWSRawMessage(item)
+		}
+	}
+	return calls, outputs
+}
+
+func isOpenAIWSToolCallType(itemType string) bool {
+	switch strings.TrimSpace(itemType) {
+	case "function_call", "custom_tool_call":
+		return true
+	default:
+		return false
+	}
+}
+
+func isOpenAIWSToolOutputType(itemType string) bool {
+	switch strings.TrimSpace(itemType) {
+	case "function_call_output", "custom_tool_call_output":
+		return true
+	default:
+		return false
+	}
+}
+
+func cloneOpenAIWSRawMessage(item json.RawMessage) json.RawMessage {
+	if item == nil {
+		return nil
+	}
+	return append(json.RawMessage(nil), item...)
 }
 
 func setOpenAIWSPayloadInputSequence(

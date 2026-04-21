@@ -643,6 +643,77 @@ func TestBuildOpenAIWSReplayInputSequence(t *testing.T) {
 		require.Equal(t, "new", gjson.GetBytes(items[0], "text").String())
 	})
 
+	t.Run("no_previous_response_id_repairs_orphan_function_call_output_with_cached_call", func(t *testing.T) {
+		lastWithCall := []json.RawMessage{
+			json.RawMessage(`{"type":"function_call","call_id":"call-1","name":"tool"}`),
+		}
+		items, exists, err := buildOpenAIWSReplayInputSequence(
+			lastWithCall,
+			true,
+			[]byte(`{"input":[{"type":"function_call_output","call_id":"call-1","output":"ok"},{"type":"message","id":"msg-1"}]}`),
+			false,
+		)
+		require.NoError(t, err)
+		require.True(t, exists)
+		require.Len(t, items, 3)
+		require.Equal(t, "function_call", gjson.GetBytes(items[0], "type").String())
+		require.Equal(t, "call-1", gjson.GetBytes(items[0], "call_id").String())
+		require.Equal(t, "function_call_output", gjson.GetBytes(items[1], "type").String())
+		require.Equal(t, "call-1", gjson.GetBytes(items[1], "call_id").String())
+		require.Equal(t, "message", gjson.GetBytes(items[2], "type").String())
+	})
+
+	t.Run("no_previous_response_id_repairs_orphan_function_call_with_cached_output", func(t *testing.T) {
+		lastWithOutput := []json.RawMessage{
+			json.RawMessage(`{"type":"function_call_output","call_id":"call-1","output":"ok"}`),
+		}
+		items, exists, err := buildOpenAIWSReplayInputSequence(
+			lastWithOutput,
+			true,
+			[]byte(`{"input":[{"type":"function_call","call_id":"call-1","name":"tool"},{"type":"message","id":"msg-1"}]}`),
+			false,
+		)
+		require.NoError(t, err)
+		require.True(t, exists)
+		require.Len(t, items, 3)
+		require.Equal(t, "function_call", gjson.GetBytes(items[0], "type").String())
+		require.Equal(t, "call-1", gjson.GetBytes(items[0], "call_id").String())
+		require.Equal(t, "function_call_output", gjson.GetBytes(items[1], "type").String())
+		require.Equal(t, "call-1", gjson.GetBytes(items[1], "call_id").String())
+		require.Equal(t, "message", gjson.GetBytes(items[2], "type").String())
+	})
+
+	t.Run("no_previous_response_id_drops_orphan_function_call_output_without_cached_call", func(t *testing.T) {
+		items, exists, err := buildOpenAIWSReplayInputSequence(
+			lastFull,
+			true,
+			[]byte(`{"input":[{"type":"function_call_output","call_id":"call-1","output":"ok"},{"type":"message","id":"msg-1"}]}`),
+			false,
+		)
+		require.NoError(t, err)
+		require.True(t, exists)
+		require.Len(t, items, 1)
+		require.Equal(t, "message", gjson.GetBytes(items[0], "type").String())
+	})
+
+	t.Run("no_previous_response_id_repairs_custom_tool_output_with_cached_call", func(t *testing.T) {
+		lastWithCall := []json.RawMessage{
+			json.RawMessage(`{"type":"custom_tool_call","call_id":"call-1","name":"apply_patch"}`),
+		}
+		items, exists, err := buildOpenAIWSReplayInputSequence(
+			lastWithCall,
+			true,
+			[]byte(`{"input":[{"type":"custom_tool_call_output","call_id":"call-1","output":"ok"},{"type":"message","id":"msg-1"}]}`),
+			false,
+		)
+		require.NoError(t, err)
+		require.True(t, exists)
+		require.Len(t, items, 3)
+		require.Equal(t, "custom_tool_call", gjson.GetBytes(items[0], "type").String())
+		require.Equal(t, "custom_tool_call_output", gjson.GetBytes(items[1], "type").String())
+		require.Equal(t, "message", gjson.GetBytes(items[2], "type").String())
+	})
+
 	t.Run("previous_response_id_delta_append", func(t *testing.T) {
 		items, exists, err := buildOpenAIWSReplayInputSequence(
 			lastFull,
