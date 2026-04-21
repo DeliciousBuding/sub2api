@@ -34,7 +34,23 @@ Changes outside these categories need an explicit design note before implementat
 - unified OpenAI session identity resolution across HTTP + websocket entry paths
 - sticky-session and continuation diagnostics in OpenAI handlers
 - websocket tool transcript replay repair for orphan tool-call / tool-output pairs
+- session-scoped websocket tool transcript cache for reconnect / new-client continuation repair
 - tracked import checklist for `CLIProxyAPI` feature absorption
+
+## Release Defaults
+
+Current VectorControl production stance for OpenAI WS / Responses traffic:
+
+- keep `gateway.openai_ws.enabled=true`
+- keep `gateway.openai_ws.responses_websockets_v2=true`
+- keep `gateway.openai_ws.mode_router_v2_enabled=false` unless a canary explicitly needs mixed ingress modes
+- keep `gateway.openai_ws.ingress_mode_default=ctx_pool`
+- keep `gateway.openai_ws.sticky_session_ttl_seconds=3600`
+- keep `gateway.openai_ws.sticky_response_id_ttl_seconds=3600`
+- keep `gateway.openai_ws.store_disabled_conn_mode=strict`
+- keep nginx `underscores_in_headers on;` on every reverse-proxy hop that fronts Codex / CLI traffic
+
+These defaults are the baseline that the fork tests against. If a rollout changes them, record the reason in the rollout note before shipping.
 
 ## Current Priority Order
 
@@ -71,3 +87,5 @@ When a fork-only behavior changes request routing or continuation behavior:
 - land focused tests first or in the same change
 - validate with canary traffic before broad rollout
 - record the import and merge-risk in `docs/`
+
+Use `docs/VECTORCONTROL_RELEASE_RUNBOOK.md` for the concrete release, canary, and rollback sequence.

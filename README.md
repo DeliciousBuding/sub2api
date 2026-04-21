@@ -52,6 +52,7 @@ VectorControl fork docs:
 - [Fork Merge Policy](docs/VECTORCONTROL_FORK_MERGE_POLICY.md)
 - [Fork Migration Checklist](docs/VECTORCONTROL_FORK_MIGRATION_CHECKLIST.md)
 - [Upstream Sync Runbook](docs/VECTORCONTROL_UPSTREAM_SYNC_RUNBOOK.md)
+- [Release Runbook](docs/VECTORCONTROL_RELEASE_RUNBOOK.md)
 
 ## Features
 

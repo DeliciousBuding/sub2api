@@ -105,6 +105,7 @@ If replayed or dropped commits changed the effective fork behavior, update:
 - `docs/VECTORCONTROL_FORK_RUNTIME.md`
 - `docs/VECTORCONTROL_FORK_MERGE_POLICY.md`
 - `docs/VECTORCONTROL_FORK_MIGRATION_CHECKLIST.md`
+- `docs/VECTORCONTROL_RELEASE_RUNBOOK.md` if rollout gates or release commands changed
 
 ### 8. Push only after the branch is coherent
 
