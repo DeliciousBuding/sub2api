@@ -1537,9 +1537,25 @@ func openAIWSRawItemsHasPrefix(items []json.RawMessage, prefix []json.RawMessage
 	return true
 }
 
+func openAIWSRawItemsEqual(left []json.RawMessage, right []json.RawMessage) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for idx := range left {
+		leftNormalized := normalizeOpenAIWSJSONForCompareOrRaw(left[idx])
+		rightNormalized := normalizeOpenAIWSJSONForCompareOrRaw(right[idx])
+		if !bytes.Equal(leftNormalized, rightNormalized) {
+			return false
+		}
+	}
+	return true
+}
+
 func buildOpenAIWSReplayInputSequence(
 	previousFullInput []json.RawMessage,
 	previousFullInputExists bool,
+	sessionToolTranscript []json.RawMessage,
+	sessionToolTranscriptExists bool,
 	currentPayload []byte,
 	hasPreviousResponseID bool,
 ) ([]json.RawMessage, bool, error) {
@@ -1551,6 +1567,11 @@ func buildOpenAIWSReplayInputSequence(
 		items := cloneOpenAIWSRawMessages(currentItems)
 		if previousFullInputExists && len(previousFullInput) > 0 && currentExists && len(items) > 0 {
 			if repaired, changed := repairOpenAIWSToolTranscript(previousFullInput, items); changed {
+				return repaired, currentExists, nil
+			}
+		}
+		if sessionToolTranscriptExists && len(sessionToolTranscript) > 0 && currentExists && len(items) > 0 {
+			if repaired, changed := repairOpenAIWSToolTranscript(sessionToolTranscript, items); changed {
 				return repaired, currentExists, nil
 			}
 		}
@@ -1672,6 +1693,24 @@ func buildOpenAIWSToolTranscriptCache(items []json.RawMessage) (map[string]json.
 		}
 	}
 	return calls, outputs
+}
+
+func filterOpenAIWSToolTranscriptItems(items []json.RawMessage) []json.RawMessage {
+	if len(items) == 0 {
+		return nil
+	}
+	filtered := make([]json.RawMessage, 0, len(items))
+	for _, item := range items {
+		itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
+		if !isOpenAIWSToolCallType(itemType) && !isOpenAIWSToolOutputType(itemType) {
+			continue
+		}
+		filtered = append(filtered, cloneOpenAIWSRawMessage(item))
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return filtered
 }
 
 func isOpenAIWSToolCallType(itemType string) bool {
@@ -3304,9 +3343,16 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				)
 			}
 		}
+		var sessionToolTranscript []json.RawMessage
+		sessionToolTranscriptExists := false
+		if stateStore != nil && sessionHash != "" {
+			sessionToolTranscript, sessionToolTranscriptExists = stateStore.GetSessionToolTranscript(groupID, sessionHash)
+		}
 		nextReplayInput, nextReplayInputExists, replayInputErr := buildOpenAIWSReplayInputSequence(
 			lastTurnReplayInput,
 			lastTurnReplayInputExists,
+			sessionToolTranscript,
+			sessionToolTranscriptExists,
 			currentPayload,
 			currentPreviousResponseID != "",
 		)
@@ -3323,6 +3369,36 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		} else {
 			currentTurnReplayInput = nextReplayInput
 			currentTurnReplayInputExists = nextReplayInputExists
+		}
+		if currentPreviousResponseID == "" && currentTurnReplayInputExists {
+			currentInputItems, currentInputExists, currentInputErr := openAIWSExtractNormalizedInputSequence(currentPayload)
+			if currentInputErr != nil {
+				logOpenAIWSModeInfo(
+					"ingress_ws_replay_input_apply_skip account_id=%d turn=%d conn_id=%s reason=extract_error cause=%s",
+					account.ID,
+					turn,
+					truncateOpenAIWSLogValue(sessionConnID, openAIWSIDValueMaxLen),
+					truncateOpenAIWSLogValue(currentInputErr.Error(), openAIWSLogValueMaxLen),
+				)
+			} else if !currentInputExists || !openAIWSRawItemsEqual(currentInputItems, currentTurnReplayInput) {
+				updatedPayload, setInputErr := setOpenAIWSPayloadInputSequence(
+					currentPayload,
+					currentTurnReplayInput,
+					currentTurnReplayInputExists,
+				)
+				if setInputErr != nil {
+					logOpenAIWSModeInfo(
+						"ingress_ws_replay_input_apply_skip account_id=%d turn=%d conn_id=%s reason=set_full_input_error cause=%s",
+						account.ID,
+						turn,
+						truncateOpenAIWSLogValue(sessionConnID, openAIWSIDValueMaxLen),
+						truncateOpenAIWSLogValue(setInputErr.Error(), openAIWSLogValueMaxLen),
+					)
+				} else {
+					currentPayload = updatedPayload
+					currentPayloadBytes = len(updatedPayload)
+				}
+			}
 		}
 		if storeDisabled && turn > 1 && currentPreviousResponseID != "" {
 			shouldKeepPreviousResponseID := false
@@ -3581,6 +3657,11 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			ttl := s.openAIWSResponseStickyTTL()
 			logOpenAIWSBindResponseAccountWarn(groupID, account.ID, responseID, stateStore.BindResponseAccount(ctx, groupID, responseID, account.ID, ttl))
 			stateStore.BindResponseConn(responseID, connID, ttl)
+		}
+		if stateStore != nil && sessionHash != "" && currentTurnReplayInputExists {
+			if toolTranscriptItems := filterOpenAIWSToolTranscriptItems(currentTurnReplayInput); len(toolTranscriptItems) > 0 {
+				stateStore.BindSessionToolTranscript(groupID, sessionHash, toolTranscriptItems, s.openAIWSSessionStickyTTL())
+			}
 		}
 		if stateStore != nil && storeDisabled && sessionHash != "" {
 			stateStore.BindSessionConn(groupID, sessionHash, connID, s.openAIWSSessionStickyTTL())

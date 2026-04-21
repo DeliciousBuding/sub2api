@@ -164,6 +164,175 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_KeepLeaseAcrossT
 	require.Len(t, captureConn.writes, 2, "应向同一上游连接发送两轮 response.create")
 }
 
+func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_RepairsToolTranscriptAcrossSessions(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	cfg := &config.Config{}
+	cfg.Security.URLAllowlist.Enabled = false
+	cfg.Security.URLAllowlist.AllowInsecureHTTP = true
+	cfg.Gateway.OpenAIWS.Enabled = true
+	cfg.Gateway.OpenAIWS.OAuthEnabled = true
+	cfg.Gateway.OpenAIWS.APIKeyEnabled = true
+	cfg.Gateway.OpenAIWS.ResponsesWebsocketsV2 = true
+	cfg.Gateway.OpenAIWS.ModeRouterV2Enabled = true
+	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 1
+	cfg.Gateway.OpenAIWS.MinIdlePerAccount = 0
+	cfg.Gateway.OpenAIWS.MaxIdlePerAccount = 1
+	cfg.Gateway.OpenAIWS.QueueLimitPerConn = 8
+	cfg.Gateway.OpenAIWS.DialTimeoutSeconds = 3
+	cfg.Gateway.OpenAIWS.ReadTimeoutSeconds = 3
+	cfg.Gateway.OpenAIWS.WriteTimeoutSeconds = 3
+
+	firstConn := &openAIWSCaptureConn{
+		events: [][]byte{
+			[]byte(`{"type":"response.completed","response":{"id":"resp_session_tool_1","model":"gpt-5.1","usage":{"input_tokens":1,"output_tokens":1}}}`),
+		},
+	}
+	secondConn := &openAIWSCaptureConn{
+		events: [][]byte{
+			[]byte(`{"type":"response.completed","response":{"id":"resp_session_tool_2","model":"gpt-5.1","usage":{"input_tokens":1,"output_tokens":1}}}`),
+		},
+	}
+	dialer := &openAIWSQueueDialer{
+		conns: []openAIWSClientConn{firstConn, secondConn},
+	}
+	pool := newOpenAIWSConnPool(cfg)
+	pool.setClientDialerForTest(dialer)
+
+	svc := &OpenAIGatewayService{
+		cfg:                cfg,
+		httpUpstream:       &httpUpstreamRecorder{},
+		cache:              &stubGatewayCache{},
+		openaiWSResolver:   NewOpenAIWSProtocolResolver(cfg),
+		toolCorrector:      NewCodexToolCorrector(),
+		openaiWSPool:       pool,
+		openaiWSStateStore: NewOpenAIWSStateStore(nil),
+	}
+
+	account := &Account{
+		ID:          514,
+		Name:        "openai-ingress-session-tool-cache",
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"api_key": "sk-test",
+		},
+		Extra: map[string]any{
+			"responses_websockets_v2_enabled":            true,
+			"openai_apikey_responses_websockets_v2_mode": OpenAIWSIngressModeDedicated,
+		},
+	}
+
+	serverErrCh := make(chan error, 2)
+	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := coderws.Accept(w, r, &coderws.AcceptOptions{
+			CompressionMode: coderws.CompressionContextTakeover,
+		})
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		defer func() {
+			_ = conn.CloseNow()
+		}()
+
+		rec := httptest.NewRecorder()
+		ginCtx, _ := gin.CreateTestContext(rec)
+		req := r.Clone(r.Context())
+		req.Header = req.Header.Clone()
+		req.Header.Set("User-Agent", "unit-test-agent/1.0")
+		ginCtx.Request = req
+
+		readCtx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		msgType, firstMessage, readErr := conn.Read(readCtx)
+		cancel()
+		if readErr != nil {
+			serverErrCh <- readErr
+			return
+		}
+		if msgType != coderws.MessageText && msgType != coderws.MessageBinary {
+			serverErrCh <- errors.New("unsupported websocket client message type")
+			return
+		}
+
+		serverErrCh <- svc.ProxyResponsesWebSocketFromClient(r.Context(), ginCtx, conn, account, "sk-test", firstMessage, nil)
+	}))
+	defer wsServer.Close()
+
+	runSingleTurnSession := func(payload string, expectedResponseID string) {
+		headers := http.Header{}
+		headers.Set("session_id", "sess_tool_cache_1")
+
+		dialCtx, cancelDial := context.WithTimeout(context.Background(), 3*time.Second)
+		clientConn, _, err := coderws.Dial(
+			dialCtx,
+			"ws"+strings.TrimPrefix(wsServer.URL, "http"),
+			&coderws.DialOptions{HTTPHeader: headers},
+		)
+		cancelDial()
+		require.NoError(t, err)
+		defer func() {
+			_ = clientConn.CloseNow()
+		}()
+
+		writeCtx, cancelWrite := context.WithTimeout(context.Background(), 3*time.Second)
+		err = clientConn.Write(writeCtx, coderws.MessageText, []byte(payload))
+		cancelWrite()
+		require.NoError(t, err)
+
+		readCtx, cancelRead := context.WithTimeout(context.Background(), 3*time.Second)
+		msgType, event, readErr := clientConn.Read(readCtx)
+		cancelRead()
+		require.NoError(t, readErr)
+		require.Equal(t, coderws.MessageText, msgType)
+		require.Equal(t, expectedResponseID, gjson.GetBytes(event, "response.id").String())
+
+		require.NoError(t, clientConn.Close(coderws.StatusNormalClosure, "done"))
+
+		select {
+		case serverErr := <-serverErrCh:
+			require.NoError(t, serverErr)
+		case <-time.After(5 * time.Second):
+			t.Fatal("等待 ingress websocket 结束超时")
+		}
+	}
+
+	runSingleTurnSession(
+		`{"type":"response.create","model":"gpt-5.1","stream":false,"input":[{"type":"function_call","call_id":"call_tool_cache_1","name":"shell","arguments":"{\"cmd\":\"pwd\"}"}]}`,
+		"resp_session_tool_1",
+	)
+	sessionHash, _ := deriveOpenAISessionHashes("sess_tool_cache_1")
+	cachedTranscript, ok := svc.openaiWSStateStore.GetSessionToolTranscript(0, sessionHash)
+	require.True(t, ok, "首个 session 成功后应写入 session 级 tool transcript")
+	require.Len(t, cachedTranscript, 1)
+	require.Equal(t, "function_call", gjson.GetBytes(cachedTranscript[0], "type").String())
+	runSingleTurnSession(
+		`{"type":"response.create","model":"gpt-5.1","stream":false,"input":[{"type":"function_call_output","call_id":"call_tool_cache_1","output":"ok"}]}`,
+		"resp_session_tool_2",
+	)
+
+	firstConn.mu.Lock()
+	firstWrites := append([]map[string]any(nil), firstConn.writes...)
+	firstConn.mu.Unlock()
+	require.Len(t, firstWrites, 1)
+
+	secondConn.mu.Lock()
+	secondWrites := append([]map[string]any(nil), secondConn.writes...)
+	secondConn.mu.Unlock()
+	require.Len(t, secondWrites, 1)
+
+	secondWrite := requestToJSONString(secondWrites[0])
+	require.False(t, gjson.Get(secondWrite, "previous_response_id").Exists(), "跨 session 修复不应伪造 previous_response_id")
+	require.Equal(t, 2, len(gjson.Get(secondWrite, "input").Array()), "第二个 session 的 orphan output 应补回缓存中的 tool call")
+	require.Equal(t, "function_call", gjson.Get(secondWrite, "input.0.type").String())
+	require.Equal(t, "call_tool_cache_1", gjson.Get(secondWrite, "input.0.call_id").String())
+	require.Equal(t, "function_call_output", gjson.Get(secondWrite, "input.1.type").String())
+	require.Equal(t, "call_tool_cache_1", gjson.Get(secondWrite, "input.1.call_id").String())
+}
+
 func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_DedicatedModeDoesNotReuseConnAcrossSessions(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

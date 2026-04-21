@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -39,6 +40,11 @@ type openAIWSSessionConnBinding struct {
 	expiresAt time.Time
 }
 
+type openAIWSSessionToolTranscriptBinding struct {
+	items     []json.RawMessage
+	expiresAt time.Time
+}
+
 // OpenAIWSStateStore 管理 WSv2 的粘连状态。
 // - response_id -> account_id 用于续链路由
 // - response_id -> conn_id 用于连接内上下文复用
@@ -61,6 +67,10 @@ type OpenAIWSStateStore interface {
 	BindSessionConn(groupID int64, sessionHash, connID string, ttl time.Duration)
 	GetSessionConn(groupID int64, sessionHash string) (string, bool)
 	DeleteSessionConn(groupID int64, sessionHash string)
+
+	BindSessionToolTranscript(groupID int64, sessionHash string, items []json.RawMessage, ttl time.Duration)
+	GetSessionToolTranscript(groupID int64, sessionHash string) ([]json.RawMessage, bool)
+	DeleteSessionToolTranscript(groupID int64, sessionHash string)
 }
 
 type defaultOpenAIWSStateStore struct {
@@ -74,6 +84,8 @@ type defaultOpenAIWSStateStore struct {
 	sessionToTurnState   map[string]openAIWSTurnStateBinding
 	sessionToConnMu      sync.RWMutex
 	sessionToConn        map[string]openAIWSSessionConnBinding
+	sessionToToolMu      sync.RWMutex
+	sessionToTool        map[string]openAIWSSessionToolTranscriptBinding
 
 	lastCleanupUnixNano atomic.Int64
 }
@@ -86,6 +98,7 @@ func NewOpenAIWSStateStore(cache GatewayCache) OpenAIWSStateStore {
 		responseToConn:     make(map[string]openAIWSConnBinding, 256),
 		sessionToTurnState: make(map[string]openAIWSTurnStateBinding, 256),
 		sessionToConn:      make(map[string]openAIWSSessionConnBinding, 256),
+		sessionToTool:      make(map[string]openAIWSSessionToolTranscriptBinding, 256),
 	}
 	store.lastCleanupUnixNano.Store(time.Now().UnixNano())
 	return store
@@ -299,6 +312,50 @@ func (s *defaultOpenAIWSStateStore) DeleteSessionConn(groupID int64, sessionHash
 	s.sessionToConnMu.Unlock()
 }
 
+func (s *defaultOpenAIWSStateStore) BindSessionToolTranscript(groupID int64, sessionHash string, items []json.RawMessage, ttl time.Duration) {
+	key := openAIWSSessionTurnStateKey(groupID, sessionHash)
+	if key == "" || len(items) == 0 {
+		return
+	}
+	ttl = normalizeOpenAIWSTTL(ttl)
+	s.maybeCleanup()
+
+	s.sessionToToolMu.Lock()
+	ensureBindingCapacity(s.sessionToTool, key, openAIWSStateStoreMaxEntriesPerMap)
+	s.sessionToTool[key] = openAIWSSessionToolTranscriptBinding{
+		items:     cloneOpenAIWSRawMessages(items),
+		expiresAt: time.Now().Add(ttl),
+	}
+	s.sessionToToolMu.Unlock()
+}
+
+func (s *defaultOpenAIWSStateStore) GetSessionToolTranscript(groupID int64, sessionHash string) ([]json.RawMessage, bool) {
+	key := openAIWSSessionTurnStateKey(groupID, sessionHash)
+	if key == "" {
+		return nil, false
+	}
+	s.maybeCleanup()
+
+	now := time.Now()
+	s.sessionToToolMu.RLock()
+	binding, ok := s.sessionToTool[key]
+	s.sessionToToolMu.RUnlock()
+	if !ok || now.After(binding.expiresAt) || len(binding.items) == 0 {
+		return nil, false
+	}
+	return cloneOpenAIWSRawMessages(binding.items), true
+}
+
+func (s *defaultOpenAIWSStateStore) DeleteSessionToolTranscript(groupID int64, sessionHash string) {
+	key := openAIWSSessionTurnStateKey(groupID, sessionHash)
+	if key == "" {
+		return
+	}
+	s.sessionToToolMu.Lock()
+	delete(s.sessionToTool, key)
+	s.sessionToToolMu.Unlock()
+}
+
 func (s *defaultOpenAIWSStateStore) maybeCleanup() {
 	if s == nil {
 		return
@@ -328,6 +385,10 @@ func (s *defaultOpenAIWSStateStore) maybeCleanup() {
 	s.sessionToConnMu.Lock()
 	cleanupExpiredSessionConnBindings(s.sessionToConn, now, openAIWSStateStoreCleanupMaxPerMap)
 	s.sessionToConnMu.Unlock()
+
+	s.sessionToToolMu.Lock()
+	cleanupExpiredSessionToolTranscriptBindings(s.sessionToTool, now, openAIWSStateStoreCleanupMaxPerMap)
+	s.sessionToToolMu.Unlock()
 }
 
 func cleanupExpiredAccountBindings(bindings map[string]openAIWSAccountBinding, now time.Time, maxScan int) {
@@ -379,6 +440,22 @@ func cleanupExpiredTurnStateBindings(bindings map[string]openAIWSTurnStateBindin
 }
 
 func cleanupExpiredSessionConnBindings(bindings map[string]openAIWSSessionConnBinding, now time.Time, maxScan int) {
+	if len(bindings) == 0 || maxScan <= 0 {
+		return
+	}
+	scanned := 0
+	for key, binding := range bindings {
+		if now.After(binding.expiresAt) {
+			delete(bindings, key)
+		}
+		scanned++
+		if scanned >= maxScan {
+			break
+		}
+	}
+}
+
+func cleanupExpiredSessionToolTranscriptBindings(bindings map[string]openAIWSSessionToolTranscriptBinding, now time.Time, maxScan int) {
 	if len(bindings) == 0 || maxScan <= 0 {
 		return
 	}

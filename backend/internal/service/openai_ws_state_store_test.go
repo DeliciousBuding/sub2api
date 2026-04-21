@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -72,6 +73,33 @@ func TestOpenAIWSStateStore_SessionConnTTL(t *testing.T) {
 
 	time.Sleep(60 * time.Millisecond)
 	_, ok = store.GetSessionConn(9, "session_hash_conn_1")
+	require.False(t, ok)
+}
+
+func TestOpenAIWSStateStore_SessionToolTranscriptTTL(t *testing.T) {
+	store := NewOpenAIWSStateStore(nil)
+	items := []json.RawMessage{
+		json.RawMessage(`{"type":"function_call","call_id":"call_1","name":"shell"}`),
+		json.RawMessage(`{"type":"function_call_output","call_id":"call_1","output":"ok"}`),
+	}
+	store.BindSessionToolTranscript(9, "session_hash_tool_1", items, 30*time.Millisecond)
+
+	got, ok := store.GetSessionToolTranscript(9, "session_hash_tool_1")
+	require.True(t, ok)
+	require.Len(t, got, 2)
+	require.JSONEq(t, string(items[0]), string(got[0]))
+	require.JSONEq(t, string(items[1]), string(got[1]))
+
+	got[0] = json.RawMessage(`{"type":"function_call","call_id":"call_1","name":"mutated"}`)
+	fresh, ok := store.GetSessionToolTranscript(9, "session_hash_tool_1")
+	require.True(t, ok)
+	require.JSONEq(t, `{"type":"function_call","call_id":"call_1","name":"shell"}`, string(fresh[0]), "读取结果应返回副本，避免调用方污染缓存")
+
+	_, ok = store.GetSessionToolTranscript(10, "session_hash_tool_1")
+	require.False(t, ok, "tool transcript 应按 group 隔离")
+
+	time.Sleep(60 * time.Millisecond)
+	_, ok = store.GetSessionToolTranscript(9, "session_hash_tool_1")
 	require.False(t, ok)
 }
 
