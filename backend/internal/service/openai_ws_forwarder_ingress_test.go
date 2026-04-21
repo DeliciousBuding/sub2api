@@ -759,6 +759,26 @@ func TestBuildOpenAIWSReplayInputSequence(t *testing.T) {
 		require.Equal(t, "message", gjson.GetBytes(items[2], "type").String())
 	})
 
+	t.Run("no_previous_response_id_repairs_orphan_custom_tool_output_with_session_cached_call", func(t *testing.T) {
+		sessionTranscript := []json.RawMessage{
+			json.RawMessage(`{"type":"custom_tool_call","call_id":"call-1","name":"apply_patch"}`),
+		}
+		items, exists, err := buildOpenAIWSReplayInputSequence(
+			nil,
+			false,
+			sessionTranscript,
+			true,
+			[]byte(`{"input":[{"type":"custom_tool_call_output","call_id":"call-1","output":"ok"},{"type":"message","id":"msg-1"}]}`),
+			false,
+		)
+		require.NoError(t, err)
+		require.True(t, exists)
+		require.Len(t, items, 3)
+		require.Equal(t, "custom_tool_call", gjson.GetBytes(items[0], "type").String())
+		require.Equal(t, "custom_tool_call_output", gjson.GetBytes(items[1], "type").String())
+		require.Equal(t, "message", gjson.GetBytes(items[2], "type").String())
+	})
+
 	t.Run("previous_response_id_delta_append", func(t *testing.T) {
 		items, exists, err := buildOpenAIWSReplayInputSequence(
 			lastFull,
