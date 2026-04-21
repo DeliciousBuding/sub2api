@@ -34,6 +34,25 @@ Demo credentials (shared demo environment; **not** created automatically for sel
 
 Sub2API is an AI API gateway platform designed to distribute and manage API quotas from AI product subscriptions. Users can access upstream AI services through platform-generated API Keys, while the platform handles authentication, billing, load balancing, and request forwarding.
 
+## VectorControl Edition
+
+This repository is also used as the base of the **VectorControl deeply customized edition** on branch `vectorcontrol/main`.
+
+VectorControl keeps `sub2api` as the permanent backend base, keeps `metapi` as the public edge, and applies a small production-focused fork for:
+
+- Codex / OpenAI Responses session continuity hardening
+- sticky-session diagnostics and operator observability
+- runtime hygiene fixes that reduce long-run risk
+
+The fork intentionally does **not** replace upstream `sub2api` architecture with CPA-style in-memory stats or a separate auth-first routing model.
+
+VectorControl fork docs:
+
+- [Fork Runtime Handbook](docs/VECTORCONTROL_FORK_RUNTIME.md)
+- [Fork Merge Policy](docs/VECTORCONTROL_FORK_MERGE_POLICY.md)
+- [Fork Migration Checklist](docs/VECTORCONTROL_FORK_MIGRATION_CHECKLIST.md)
+- [Upstream Sync Runbook](docs/VECTORCONTROL_UPSTREAM_SYNC_RUNBOOK.md)
+
 ## Features
 
 - **Multi-Account Management** - Support multiple upstream account types (OAuth, API Key)

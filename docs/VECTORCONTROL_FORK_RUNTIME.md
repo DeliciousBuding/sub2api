@@ -31,6 +31,9 @@ Changes outside these categories need an explicit design note before implementat
 - OpenAI `plan_type` aware account priority bias
 - conservative OpenAI refresh behavior when `expires_at` is absent
 - bounded auxiliary `req.Client` pool for OAuth/privacy helper traffic
+- unified OpenAI session identity resolution across HTTP + websocket entry paths
+- sticky-session and continuation diagnostics in OpenAI handlers
+- websocket tool transcript replay repair for orphan tool-call / tool-output pairs
 - tracked import checklist for `CLIProxyAPI` feature absorption
 
 ## Current Priority Order

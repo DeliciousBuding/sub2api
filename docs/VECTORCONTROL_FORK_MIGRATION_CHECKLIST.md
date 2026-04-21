@@ -63,6 +63,10 @@ These are the features worth porting into the fork instead of changing the produ
 
 ### P0: Session Identity Extraction Parity
 
+Status:
+
+- implemented in `vectorcontrol/main`
+
 Why:
 
 - cache hit rate and continuity depend on stable session extraction
@@ -96,6 +100,10 @@ Expected benefit:
 
 ### P0: Responses Websocket Tool-Call Repair
 
+Status:
+
+- partially implemented in `vectorcontrol/main`
+
 Why:
 
 - `CLIProxyAPI` recently hardened the OpenAI Responses websocket path with session-scoped tool-call / tool-output repair
@@ -105,12 +113,18 @@ Import target:
 
 - port the repair logic only for the specific broken event patterns
 - keep `sub2api`'s current routing and account ownership model intact
+- current fork already repairs replay-input transcript gaps for orphan tool-call / tool-output pairs
+- remaining work is a fuller session-scoped cache beyond last-turn replay input
 
 Expected benefit:
 
 - fewer edge-case tool-call breakages in Codex / Responses websocket sessions
 
 ### P1: Explicit Session-Affinity Diagnostics
+
+Status:
+
+- implemented in `vectorcontrol/main` for OpenAI handler scheduling logs
 
 Why:
 
@@ -208,7 +222,7 @@ Why it matters:
 
 Status:
 
-- ongoing
+- done for the current scheduler feedback path
 
 Summary:
 

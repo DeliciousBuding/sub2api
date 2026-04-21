@@ -714,6 +714,19 @@ func TestBuildOpenAIWSReplayInputSequence(t *testing.T) {
 		require.Equal(t, "message", gjson.GetBytes(items[2], "type").String())
 	})
 
+	t.Run("no_previous_response_id_drops_orphan_custom_tool_output_without_cached_call", func(t *testing.T) {
+		items, exists, err := buildOpenAIWSReplayInputSequence(
+			lastFull,
+			true,
+			[]byte(`{"input":[{"type":"custom_tool_call_output","call_id":"call-1","output":"ok"},{"type":"message","id":"msg-1"}]}`),
+			false,
+		)
+		require.NoError(t, err)
+		require.True(t, exists)
+		require.Len(t, items, 1)
+		require.Equal(t, "message", gjson.GetBytes(items[0], "type").String())
+	})
+
 	t.Run("previous_response_id_delta_append", func(t *testing.T) {
 		items, exists, err := buildOpenAIWSReplayInputSequence(
 			lastFull,
