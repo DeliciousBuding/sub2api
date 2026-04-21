@@ -237,6 +237,88 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_SessionSticky(t *testin
 	}
 }
 
+func TestOpenAIGatewayService_SelectAccountWithScheduler_StickySessionMissReason_NoBinding(t *testing.T) {
+	ctx := context.Background()
+	groupID := int64(10)
+	account := Account{
+		ID:          2002,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeOAuth,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+	}
+
+	svc := &OpenAIGatewayService{
+		accountRepo:        stubOpenAIAccountRepo{accounts: []Account{account}},
+		cache:              &stubGatewayCache{sessionBindings: map[string]int64{}},
+		cfg:                &config.Config{},
+		concurrencyService: NewConcurrencyService(stubConcurrencyCache{}),
+	}
+
+	selection, decision, err := svc.SelectAccountWithScheduler(
+		ctx,
+		&groupID,
+		"",
+		"session_hash_missing",
+		"gpt-5.1",
+		nil,
+		OpenAIUpstreamTransportAny,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.NotNil(t, selection.Account)
+	require.True(t, decision.StickySessionRequested)
+	require.False(t, decision.StickySessionHit)
+	require.Equal(t, "binding_not_found", decision.StickySessionMissReason)
+}
+
+func TestOpenAIGatewayService_SelectAccountWithScheduler_StickySessionClearedReason_Unschedulable(t *testing.T) {
+	ctx := context.Background()
+	groupID := int64(10)
+	account := Account{
+		ID:          2003,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeOAuth,
+		Status:      StatusDisabled,
+		Schedulable: true,
+		Concurrency: 1,
+	}
+	cache := &stubGatewayCache{
+		sessionBindings: map[string]int64{
+			"openai:session_hash_stale": account.ID,
+		},
+	}
+
+	svc := &OpenAIGatewayService{
+		accountRepo: stubOpenAIAccountRepo{accounts: []Account{
+			account,
+			{ID: 2004, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true, Concurrency: 1, Priority: 1},
+		}},
+		cache:              cache,
+		cfg:                &config.Config{},
+		concurrencyService: NewConcurrencyService(stubConcurrencyCache{}),
+	}
+
+	selection, decision, err := svc.SelectAccountWithScheduler(
+		ctx,
+		&groupID,
+		"",
+		"session_hash_stale",
+		"gpt-5.1",
+		nil,
+		OpenAIUpstreamTransportAny,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.NotNil(t, selection.Account)
+	require.True(t, decision.StickySessionRequested)
+	require.False(t, decision.StickySessionHit)
+	require.Equal(t, "binding_cleared", decision.StickySessionMissReason)
+	require.Equal(t, "account_unschedulable", decision.StickySessionClearedReason)
+	require.Equal(t, 1, cache.deletedSessions["openai:session_hash_stale"])
+}
+
 func TestOpenAIGatewayService_SelectAccountWithScheduler_SessionStickyBusyKeepsSticky(t *testing.T) {
 	ctx := context.Background()
 	groupID := int64(10100)

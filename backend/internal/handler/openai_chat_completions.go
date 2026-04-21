@@ -106,8 +106,9 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 		return
 	}
 
-	sessionHash := h.gatewayService.GenerateSessionHash(c, body)
-	promptCacheKey := h.gatewayService.ExtractSessionID(c, body)
+	sessionIdentity := h.gatewayService.ResolveSessionIdentity(c, body)
+	sessionHash := sessionIdentity.SessionHash
+	promptCacheKey := sessionIdentity.PromptCacheKey
 
 	maxAccountSwitches := h.maxAccountSwitches
 	switchCount := 0
@@ -173,8 +174,24 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 		}
 		account := selection.Account
 		sessionHash = ensureOpenAIPoolModeSessionHash(sessionHash, account)
+		reqLog.Debug("openai_chat_completions.account_schedule_decision",
+			zap.String("layer", scheduleDecision.Layer),
+			zap.Bool("previous_response_requested", scheduleDecision.PreviousResponseRequested),
+			zap.String("previous_response_miss_reason", scheduleDecision.PreviousResponseMissReason),
+			zap.Bool("sticky_previous_hit", scheduleDecision.StickyPreviousHit),
+			zap.Bool("sticky_session_requested", scheduleDecision.StickySessionRequested),
+			zap.Bool("sticky_session_hit", scheduleDecision.StickySessionHit),
+			zap.String("sticky_session_miss_reason", scheduleDecision.StickySessionMissReason),
+			zap.String("sticky_session_cleared_reason", scheduleDecision.StickySessionClearedReason),
+			zap.String("session_source", sessionIdentity.SessionSource),
+			zap.String("prompt_cache_source", sessionIdentity.PromptCacheSource),
+			zap.Bool("has_prompt_cache_key", promptCacheKey != ""),
+			zap.Int("candidate_count", scheduleDecision.CandidateCount),
+			zap.Int("top_k", scheduleDecision.TopK),
+			zap.Int64("latency_ms", scheduleDecision.LatencyMs),
+			zap.Float64("load_skew", scheduleDecision.LoadSkew),
+		)
 		reqLog.Debug("openai_chat_completions.account_selected", zap.Int64("account_id", account.ID), zap.String("account_name", account.Name))
-		_ = scheduleDecision
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 
 		accountReleaseFunc, acquired := h.acquireResponsesAccountSlot(c, apiKey.GroupID, sessionHash, selection, reqStream, &streamStarted, reqLog)

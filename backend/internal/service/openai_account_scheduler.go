@@ -32,15 +32,20 @@ type OpenAIAccountScheduleRequest struct {
 }
 
 type OpenAIAccountScheduleDecision struct {
-	Layer               string
-	StickyPreviousHit   bool
-	StickySessionHit    bool
-	CandidateCount      int
-	TopK                int
-	LatencyMs           int64
-	LoadSkew            float64
-	SelectedAccountID   int64
-	SelectedAccountType string
+	Layer                      string
+	PreviousResponseRequested  bool
+	StickyPreviousHit          bool
+	PreviousResponseMissReason string
+	StickySessionRequested     bool
+	StickySessionHit           bool
+	StickySessionMissReason    string
+	StickySessionClearedReason string
+	CandidateCount             int
+	TopK                       int
+	LatencyMs                  int64
+	LoadSkew                   float64
+	SelectedAccountID          int64
+	SelectedAccountType        string
 }
 
 type OpenAIAccountSchedulerMetricsSnapshot struct {
@@ -212,6 +217,12 @@ type defaultOpenAIAccountScheduler struct {
 	stats   *openAIAccountRuntimeStats
 }
 
+type openAIStickySessionAttempt struct {
+	Requested     bool
+	MissReason    string
+	ClearedReason string
+}
+
 func newDefaultOpenAIAccountScheduler(service *OpenAIGatewayService, stats *openAIAccountRuntimeStats) OpenAIAccountScheduler {
 	if stats == nil {
 		stats = newOpenAIAccountRuntimeStats()
@@ -235,6 +246,7 @@ func (s *defaultOpenAIAccountScheduler) Select(
 
 	previousResponseID := strings.TrimSpace(req.PreviousResponseID)
 	if previousResponseID != "" {
+		decision.PreviousResponseRequested = true
 		selection, err := s.service.SelectAccountByPreviousResponseID(
 			ctx,
 			req.GroupID,
@@ -247,6 +259,7 @@ func (s *defaultOpenAIAccountScheduler) Select(
 		}
 		if selection != nil && selection.Account != nil {
 			if !s.isAccountTransportCompatible(selection.Account, req.RequiredTransport) {
+				decision.PreviousResponseMissReason = "transport_incompatible"
 				selection = nil
 			}
 		}
@@ -260,9 +273,15 @@ func (s *defaultOpenAIAccountScheduler) Select(
 			}
 			return selection, decision, nil
 		}
+		if decision.PreviousResponseMissReason == "" {
+			decision.PreviousResponseMissReason = "not_found_or_unavailable"
+		}
 	}
 
-	selection, err := s.selectBySessionHash(ctx, req)
+	selection, stickyAttempt, err := s.selectBySessionHash(ctx, req)
+	decision.StickySessionRequested = stickyAttempt.Requested
+	decision.StickySessionMissReason = stickyAttempt.MissReason
+	decision.StickySessionClearedReason = stickyAttempt.ClearedReason
 	if err != nil {
 		return nil, decision, err
 	}
@@ -292,10 +311,13 @@ func (s *defaultOpenAIAccountScheduler) Select(
 func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 	ctx context.Context,
 	req OpenAIAccountScheduleRequest,
-) (*AccountSelectionResult, error) {
+) (*AccountSelectionResult, openAIStickySessionAttempt, error) {
+	attempt := openAIStickySessionAttempt{
+		Requested: strings.TrimSpace(req.SessionHash) != "",
+	}
 	sessionHash := strings.TrimSpace(req.SessionHash)
 	if sessionHash == "" || s == nil || s.service == nil || s.service.cache == nil {
-		return nil, nil
+		return nil, attempt, nil
 	}
 
 	accountID := req.StickyAccountID
@@ -303,38 +325,50 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 		var err error
 		accountID, err = s.service.getStickySessionAccountID(ctx, req.GroupID, sessionHash)
 		if err != nil || accountID <= 0 {
-			return nil, nil
+			attempt.MissReason = "binding_not_found"
+			return nil, attempt, nil
 		}
 	}
 	if accountID <= 0 {
-		return nil, nil
+		attempt.MissReason = "binding_not_found"
+		return nil, attempt, nil
 	}
 	if req.ExcludedIDs != nil {
 		if _, excluded := req.ExcludedIDs[accountID]; excluded {
-			return nil, nil
+			attempt.MissReason = "excluded_account"
+			return nil, attempt, nil
 		}
 	}
 
 	account, err := s.service.getSchedulableAccount(ctx, accountID)
 	if err != nil || account == nil {
 		_ = s.service.deleteStickySessionAccountID(ctx, req.GroupID, sessionHash)
-		return nil, nil
+		attempt.MissReason = "binding_account_missing"
+		attempt.ClearedReason = "binding_account_missing"
+		return nil, attempt, nil
 	}
 	if shouldClearStickySession(account, req.RequestedModel) || !account.IsOpenAI() || !account.IsSchedulable() {
 		_ = s.service.deleteStickySessionAccountID(ctx, req.GroupID, sessionHash)
-		return nil, nil
+		attempt.MissReason = "binding_cleared"
+		attempt.ClearedReason = "account_unschedulable"
+		return nil, attempt, nil
 	}
 	if req.RequestedModel != "" && !account.IsModelSupported(req.RequestedModel) {
-		return nil, nil
+		attempt.MissReason = "model_not_supported"
+		return nil, attempt, nil
 	}
 	if !s.isAccountTransportCompatible(account, req.RequiredTransport) {
 		_ = s.service.deleteStickySessionAccountID(ctx, req.GroupID, sessionHash)
-		return nil, nil
+		attempt.MissReason = "binding_cleared"
+		attempt.ClearedReason = "transport_incompatible"
+		return nil, attempt, nil
 	}
 	account = s.service.recheckSelectedOpenAIAccountFromDB(ctx, account, req.RequestedModel)
 	if account == nil {
 		_ = s.service.deleteStickySessionAccountID(ctx, req.GroupID, sessionHash)
-		return nil, nil
+		attempt.MissReason = "binding_cleared"
+		attempt.ClearedReason = "db_recheck_failed"
+		return nil, attempt, nil
 	}
 
 	result, acquireErr := s.service.tryAcquireAccountSlot(ctx, accountID, account.Concurrency)
@@ -344,7 +378,7 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 			Account:     account,
 			Acquired:    true,
 			ReleaseFunc: result.ReleaseFunc,
-		}, nil
+		}, attempt, nil
 	}
 
 	cfg := s.service.schedulingConfig()
@@ -358,9 +392,10 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 				Timeout:        cfg.StickySessionWaitTimeout,
 				MaxWaiting:     cfg.StickySessionMaxWaiting,
 			},
-		}, nil
+		}, attempt, nil
 	}
-	return nil, nil
+	attempt.MissReason = "sticky_account_busy"
+	return nil, attempt, nil
 }
 
 type openAIAccountCandidateScore struct {

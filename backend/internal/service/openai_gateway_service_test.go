@@ -291,6 +291,61 @@ func TestOpenAIGatewayService_GenerateSessionHash_EmptyBodyStillEmpty(t *testing
 	require.Empty(t, svc.GenerateSessionHash(c, nil))
 }
 
+func TestOpenAIGatewayService_ResolveSessionIdentity_PriorityAndSources(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/openai/v1/responses", nil)
+
+	svc := &OpenAIGatewayService{}
+
+	body := []byte(`{"metadata":{"user_id":"{\"device_id\":\"deadbeef00112233445566778899aabbccddeeff0011223344556677\",\"account_uuid\":\"\",\"session_id\":\"c72554f2-1234-5678-abcd-123456789abc\"}"},"conversation_id":"conv-body","prompt_cache_key":"pk-123"}`)
+	identity := svc.ResolveSessionIdentity(c, body)
+	require.Equal(t, "metadata_user_id_session", identity.SessionSource)
+	require.Equal(t, "metadata_user_id_session", identity.PromptCacheSource)
+	require.Equal(t, "c72554f2-1234-5678-abcd-123456789abc", identity.PromptCacheKey)
+	require.NotEmpty(t, identity.SessionHash)
+
+	c.Request.Header = http.Header{}
+	c.Request.Header.Set("X-Session-ID", "x-session-1")
+	identity = svc.ResolveSessionIdentity(c, []byte(`{"prompt_cache_key":"pk-456"}`))
+	require.Equal(t, "header_session_id", identity.SessionSource)
+	require.Equal(t, "header_session_id", identity.PromptCacheSource)
+	require.Equal(t, "x-session-1", identity.PromptCacheKey)
+
+	c.Request.Header = http.Header{}
+	identity = svc.ResolveSessionIdentity(c, []byte(`{"metadata":{"user_id":"plain-user-id"},"prompt_cache_key":"pk-789"}`))
+	require.Equal(t, "metadata_user_id", identity.SessionSource)
+	require.Equal(t, "metadata_user_id", identity.PromptCacheSource)
+	require.Equal(t, GenerateSessionUUID("metadata_user_id:plain-user-id"), identity.PromptCacheKey)
+
+	identity = svc.ResolveSessionIdentity(c, []byte(`{"conversation_id":"conv-body","prompt_cache_key":"pk-789"}`))
+	require.Equal(t, "body_conversation_id", identity.SessionSource)
+	require.Equal(t, "body_conversation_id", identity.PromptCacheSource)
+	require.Equal(t, "conv-body", identity.PromptCacheKey)
+
+	identity = svc.ResolveSessionIdentity(c, []byte(`{"messages":[{"role":"user","content":"hello"}]}`))
+	require.Equal(t, "content_fallback", identity.SessionSource)
+	require.Equal(t, "none", identity.PromptCacheSource)
+	require.Empty(t, identity.PromptCacheKey)
+	require.NotEmpty(t, identity.SessionHash)
+}
+
+func TestOpenAIGatewayService_ExtractSessionID_UsesUnifiedIdentityResolution(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/openai/v1/responses", nil)
+
+	svc := &OpenAIGatewayService{}
+
+	body := []byte(`{"metadata":{"user_id":"plain-user-id"}}`)
+	require.Equal(t, GenerateSessionUUID("metadata_user_id:plain-user-id"), svc.ExtractSessionID(c, body))
+
+	c.Request.Header.Set("Session_id", "session-header-legacy")
+	require.Equal(t, "session-header-legacy", svc.ExtractSessionID(c, []byte(`{"prompt_cache_key":"pk-1"}`)))
+}
+
 func (c stubConcurrencyCache) GetAccountWaitingCount(ctx context.Context, accountID int64) (int, error) {
 	if c.waitCounts != nil {
 		if count, ok := c.waitCounts[accountID]; ok {

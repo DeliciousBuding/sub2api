@@ -228,8 +228,8 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		return
 	}
 
-	// Generate session hash (header first; fallback to prompt_cache_key)
-	sessionHash := h.gatewayService.GenerateSessionHash(c, sessionHashBody)
+	sessionIdentity := h.gatewayService.ResolveSessionIdentity(c, sessionHashBody)
+	sessionHash := sessionIdentity.SessionHash
 
 	maxAccountSwitches := h.maxAccountSwitches
 	switchCount := 0
@@ -274,8 +274,14 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		}
 		reqLog.Debug("openai.account_schedule_decision",
 			zap.String("layer", scheduleDecision.Layer),
+			zap.Bool("previous_response_requested", scheduleDecision.PreviousResponseRequested),
+			zap.String("previous_response_miss_reason", scheduleDecision.PreviousResponseMissReason),
 			zap.Bool("sticky_previous_hit", scheduleDecision.StickyPreviousHit),
+			zap.Bool("sticky_session_requested", scheduleDecision.StickySessionRequested),
 			zap.Bool("sticky_session_hit", scheduleDecision.StickySessionHit),
+			zap.String("sticky_session_miss_reason", scheduleDecision.StickySessionMissReason),
+			zap.String("sticky_session_cleared_reason", scheduleDecision.StickySessionClearedReason),
+			zap.String("session_source", sessionIdentity.SessionSource),
 			zap.Int("candidate_count", scheduleDecision.CandidateCount),
 			zap.Int("top_k", scheduleDecision.TopK),
 			zap.Int64("latency_ms", scheduleDecision.LatencyMs),
@@ -594,23 +600,9 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		return
 	}
 
-	sessionHash := h.gatewayService.GenerateSessionHash(c, body)
-	promptCacheKey := h.gatewayService.ExtractSessionID(c, body)
-
-	// Anthropic 格式的请求在 metadata.user_id 中携带 session 标识，
-	// 而非 OpenAI 的 session_id/conversation_id headers。
-	// 从中派生 sessionHash（sticky session）和 promptCacheKey（upstream cache）。
-	if sessionHash == "" || promptCacheKey == "" {
-		if userID := strings.TrimSpace(gjson.GetBytes(body, "metadata.user_id").String()); userID != "" {
-			seed := reqModel + "-" + userID
-			if promptCacheKey == "" {
-				promptCacheKey = service.GenerateSessionUUID(seed)
-			}
-			if sessionHash == "" {
-				sessionHash = service.DeriveSessionHashFromSeed(seed)
-			}
-		}
-	}
+	sessionIdentity := h.gatewayService.ResolveSessionIdentity(c, body)
+	sessionHash := sessionIdentity.SessionHash
+	promptCacheKey := sessionIdentity.PromptCacheKey
 
 	maxAccountSwitches := h.maxAccountSwitches
 	switchCount := 0
@@ -657,6 +649,23 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			h.anthropicStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", "No available accounts", streamStarted)
 			return
 		}
+		reqLog.Debug("openai_messages.account_schedule_decision",
+			zap.String("layer", scheduleDecision.Layer),
+			zap.Bool("previous_response_requested", scheduleDecision.PreviousResponseRequested),
+			zap.String("previous_response_miss_reason", scheduleDecision.PreviousResponseMissReason),
+			zap.Bool("sticky_previous_hit", scheduleDecision.StickyPreviousHit),
+			zap.Bool("sticky_session_requested", scheduleDecision.StickySessionRequested),
+			zap.Bool("sticky_session_hit", scheduleDecision.StickySessionHit),
+			zap.String("sticky_session_miss_reason", scheduleDecision.StickySessionMissReason),
+			zap.String("sticky_session_cleared_reason", scheduleDecision.StickySessionClearedReason),
+			zap.String("session_source", sessionIdentity.SessionSource),
+			zap.String("prompt_cache_source", sessionIdentity.PromptCacheSource),
+			zap.Bool("has_prompt_cache_key", promptCacheKey != ""),
+			zap.Int("candidate_count", scheduleDecision.CandidateCount),
+			zap.Int("top_k", scheduleDecision.TopK),
+			zap.Int64("latency_ms", scheduleDecision.LatencyMs),
+			zap.Float64("load_skew", scheduleDecision.LoadSkew),
+		)
 		account := selection.Account
 		sessionHash = ensureOpenAIPoolModeSessionHash(sessionHash, account)
 		reqLog.Debug("openai_messages.account_selected", zap.Int64("account_id", account.ID), zap.String("account_name", account.Name))
@@ -1143,11 +1152,15 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		return
 	}
 
-	sessionHash := h.gatewayService.GenerateSessionHashWithFallback(
-		c,
-		firstMessage,
-		openAIWSIngressFallbackSessionSeed(subject.UserID, apiKey.ID, apiKey.GroupID),
-	)
+	sessionIdentity := h.gatewayService.ResolveSessionIdentity(c, firstMessage)
+	sessionHash := sessionIdentity.SessionHash
+	if sessionHash == "" {
+		sessionHash = h.gatewayService.GenerateSessionHashWithFallback(
+			c,
+			firstMessage,
+			openAIWSIngressFallbackSessionSeed(subject.UserID, apiKey.ID, apiKey.GroupID),
+		)
+	}
 	selection, scheduleDecision, err := h.gatewayService.SelectAccountWithScheduler(
 		ctx,
 		apiKey.GroupID,
@@ -1210,6 +1223,15 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		zap.Int64("account_id", account.ID),
 		zap.String("account_name", account.Name),
 		zap.String("schedule_layer", scheduleDecision.Layer),
+		zap.Bool("previous_response_requested", scheduleDecision.PreviousResponseRequested),
+		zap.String("previous_response_miss_reason", scheduleDecision.PreviousResponseMissReason),
+		zap.Bool("sticky_previous_hit", scheduleDecision.StickyPreviousHit),
+		zap.Bool("sticky_session_requested", scheduleDecision.StickySessionRequested),
+		zap.Bool("sticky_session_hit", scheduleDecision.StickySessionHit),
+		zap.String("sticky_session_miss_reason", scheduleDecision.StickySessionMissReason),
+		zap.String("sticky_session_cleared_reason", scheduleDecision.StickySessionClearedReason),
+		zap.String("session_source", sessionIdentity.SessionSource),
+		zap.String("prompt_cache_source", sessionIdentity.PromptCacheSource),
 		zap.Int("candidate_count", scheduleDecision.CandidateCount),
 	)
 
