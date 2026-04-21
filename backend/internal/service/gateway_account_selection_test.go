@@ -68,6 +68,19 @@ func TestSortAccountsByPriorityAndLastUsed_PreferOAuth(t *testing.T) {
 	require.Equal(t, int64(2), accounts[0].ID, "preferOAuth 时 OAuth 账号排前面")
 }
 
+func TestSortAccountsByPriorityAndLastUsed_OpenAIPlanTypeBias(t *testing.T) {
+	accounts := []*Account{
+		{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Priority: 1, LastUsedAt: nil, Credentials: map[string]any{"plan_type": "free"}},
+		{ID: 2, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Priority: 1, LastUsedAt: nil, Credentials: map[string]any{"plan_type": "plus"}},
+		{ID: 3, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Priority: 1, LastUsedAt: nil, Credentials: map[string]any{"plan_type": "team"}},
+	}
+
+	sortAccountsByPriorityAndLastUsed(accounts, false)
+	require.Equal(t, int64(3), accounts[0].ID)
+	require.Equal(t, int64(2), accounts[1].ID)
+	require.Equal(t, int64(1), accounts[2].ID)
+}
+
 func TestSortAccountsByPriorityAndLastUsed_StableSort(t *testing.T) {
 	accounts := []*Account{
 		{ID: 1, Priority: 1, LastUsedAt: nil, Type: AccountTypeAPIKey},

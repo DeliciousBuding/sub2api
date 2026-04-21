@@ -2529,8 +2529,8 @@ func selectByLRU(accounts []accountWithLoad, preferOAuth bool) *accountWithLoad 
 func sortAccountsByPriorityAndLastUsed(accounts []*Account, preferOAuth bool) {
 	sort.SliceStable(accounts, func(i, j int) bool {
 		a, b := accounts[i], accounts[j]
-		if a.Priority != b.Priority {
-			return a.Priority < b.Priority
+		if a.EffectivePriority() != b.EffectivePriority() {
+			return a.EffectivePriority() < b.EffectivePriority()
 		}
 		switch {
 		case a.LastUsedAt == nil && b.LastUsedAt != nil:
@@ -2628,7 +2628,7 @@ func shuffleWithinPriorityAndLastUsed(accounts []*Account, preferOAuth bool) {
 
 // sameAccountGroup 判断两个 Account 是否属于同一排序组（Priority + LastUsedAt）
 func sameAccountGroup(a, b *Account) bool {
-	if a.Priority != b.Priority {
+	if a.EffectivePriority() != b.EffectivePriority() {
 		return false
 	}
 	return sameLastUsedAt(a.LastUsedAt, b.LastUsedAt)

@@ -932,6 +932,39 @@ func (a *Account) GetOpenAITokenExpiresAt() *time.Time {
 	return a.GetCredentialAsTime("expires_at")
 }
 
+func (a *Account) GetOpenAIPlanType() string {
+	if !a.IsOpenAIOAuth() {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(a.GetCredential("plan_type")))
+}
+
+func (a *Account) GetOpenAIPlanPriorityBias() float64 {
+	switch a.GetOpenAIPlanType() {
+	case "team", "business", "enterprise":
+		return 0.0
+	case "plus", "pro", "edu":
+		return 0.1
+	case "free":
+		return 0.2
+	case "":
+		return 0.15
+	default:
+		return 0.15
+	}
+}
+
+func (a *Account) EffectivePriority() float64 {
+	if a == nil {
+		return 0
+	}
+	base := float64(a.Priority)
+	if a.IsOpenAIOAuth() {
+		return base + a.GetOpenAIPlanPriorityBias()
+	}
+	return base
+}
+
 func (a *Account) IsOpenAITokenExpired() bool {
 	expiresAt := a.GetOpenAITokenExpiresAt()
 	if expiresAt == nil {

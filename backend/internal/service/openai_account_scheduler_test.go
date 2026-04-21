@@ -676,6 +676,32 @@ func TestSelectTopKOpenAICandidates(t *testing.T) {
 	require.Equal(t, int64(14), topAll[3].account.ID)
 }
 
+func TestSelectTopKOpenAICandidates_PrefersBetterOpenAIPlanWithinSamePriority(t *testing.T) {
+	candidates := []openAIAccountCandidateScore{
+		{
+			account:  &Account{ID: 21, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Priority: 1, Credentials: map[string]any{"plan_type": "free"}},
+			loadInfo: &AccountLoadInfo{LoadRate: 20, WaitingCount: 1},
+			score:    10.0,
+		},
+		{
+			account:  &Account{ID: 22, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Priority: 1, Credentials: map[string]any{"plan_type": "team"}},
+			loadInfo: &AccountLoadInfo{LoadRate: 20, WaitingCount: 1},
+			score:    10.0,
+		},
+		{
+			account:  &Account{ID: 23, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Priority: 1, Credentials: map[string]any{"plan_type": "plus"}},
+			loadInfo: &AccountLoadInfo{LoadRate: 20, WaitingCount: 1},
+			score:    10.0,
+		},
+	}
+
+	topAll := selectTopKOpenAICandidates(candidates, 3)
+	require.Len(t, topAll, 3)
+	require.Equal(t, int64(22), topAll[0].account.ID)
+	require.Equal(t, int64(23), topAll[1].account.ID)
+	require.Equal(t, int64(21), topAll[2].account.ID)
+}
+
 func TestBuildOpenAIWeightedSelectionOrder_DeterministicBySessionSeed(t *testing.T) {
 	candidates := []openAIAccountCandidateScore{
 		{

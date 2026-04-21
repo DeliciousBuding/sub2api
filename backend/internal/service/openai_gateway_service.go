@@ -1363,10 +1363,10 @@ func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *i
 func (s *OpenAIGatewayService) isBetterAccount(candidate, current *Account) bool {
 	// 优先级更高（数值更小）
 	// Higher priority (lower value)
-	if candidate.Priority < current.Priority {
+	if candidate.EffectivePriority() < current.EffectivePriority() {
 		return true
 	}
-	if candidate.Priority > current.Priority {
+	if candidate.EffectivePriority() > current.EffectivePriority() {
 		return false
 	}
 
@@ -1560,8 +1560,8 @@ func (s *OpenAIGatewayService) SelectAccountWithLoadAwareness(ctx context.Contex
 		if len(available) > 0 {
 			sort.SliceStable(available, func(i, j int) bool {
 				a, b := available[i], available[j]
-				if a.account.Priority != b.account.Priority {
-					return a.account.Priority < b.account.Priority
+				if a.account.EffectivePriority() != b.account.EffectivePriority() {
+					return a.account.EffectivePriority() < b.account.EffectivePriority()
 				}
 				if a.loadInfo.LoadRate != b.loadInfo.LoadRate {
 					return a.loadInfo.LoadRate < b.loadInfo.LoadRate
